@@ -1,7 +1,19 @@
 open Batteries
+open Prelude
 
 let active = ref None
 let cut = ref 0.5
+
+let views_of_space_h : (Wlc.Space.t, Wlc.View.t Dlist.t option) Hashtbl.t =
+  Hashtbl.create 37
+
+let views_of_space s =
+  try Hashtbl.find views_of_space_h s with
+    Not_found ->
+    Hashtbl.add views_of_space_h s None;
+    None
+
+let set_views_of_space = Hashtbl.replace views_of_space_h
 
 let ( **. ) i f = (Float.of_int i) *. f |> Float.to_int
 
@@ -59,22 +71,22 @@ let relayout space =
      removed just after). Consequently, View.all_of_space returns it while it
      shouldn't be relayout'd
   *)
-  let views = Wlc.View.all_of_space space in
-  let count = List.filter is_tiled views |> List.length in
- 
+  let views = views_of_space space in
+  let count = Dlist.enum_opt views |> Enum.filter is_tiled |> Enum.count in
+
  let height = res.h / (if count > 1 then count - 1 else 1) in
   let fheight = if res.h > height * (count - 1) then
       height + (res.h - height * (count - 1))
     else height in
 
-  List.fold_left (fun (toggle, y) v ->
+  Dlist.fold_left_opt (fun (toggle, y) v ->
     if List.mem Wlc.View.Fullscreen (Wlc.View.get_state v) then
       Wlc.View.set_geometry v { origin = { x = 0; y = 0 };
                                 size = res };
 
     if List.mem Wlc.View.Splash (Wlc.View.get_type v) then (
       let g = Wlc.View.get_geometry v in
-      Wlc.View.set_geometry v 
+      Wlc.View.set_geometry v
         { g with
           origin = { x = (res.w / 2) - (g.size.w / 2);
                      y = (res.h / 2) - (g.size.h / 2) }}
@@ -86,7 +98,7 @@ let relayout space =
           not (is_or v) ->
         layout_parent v parent (Wlc.View.get_geometry v).size
       | _ -> () end;
-    
+
     if not (is_tiled v) then
       (toggle, y)
     else (
@@ -102,12 +114,12 @@ let relayout space =
                      if y = 0 then fheight else height
                    else res.h }
       };
-      
+
       (true, y + (if toggle then (if y = 0 then fheight else height) else 0))
     )
   ) (false, 0) views
   |> ignore
-  
+
 let spawn bin =
   if Unix.fork () = 0 then (
     Unix.setsid () |> ignore;
@@ -163,13 +175,13 @@ let rec set_active comp view_opt =
           let views = Wlc.View.get_space view
                       |> Wlc.View.all_of_space
                       |> List.rev in
-          
+
           (* if view has a child, focus it instead (recursively) *)
           (try set_active
                  comp
                  (Some (List.find (fun v -> Wlc.View.get_parent v = Some view) views))
            with Not_found -> ());
-          
+
           (* only raise fullscreen views when focused view is managed *)
           if is_managed view && not (is_or view) then (
             try Wlc.View.bring_to_front
@@ -178,20 +190,20 @@ let rec set_active comp view_opt =
                      views)
             with Not_found -> ()
           );
-          
+
           (* Only set active for current view to false, if new view is on same
              output and the new view is managed *)
           begin match !active with
-            | Some a when 
+            | Some a when
                 is_managed view &&
                 Wlc.Output.of_space (Wlc.View.get_space a) =
                 Wlc.Output.of_space (Wlc.View.get_space view) ->
               Wlc.View.set_state a Wlc.View.Activated false
             | _ -> () end;
-          
+
           Wlc.View.set_state view Wlc.View.Activated true;
           raise_all view;
-          
+
           (* Always bring bemenu to front when exists *)
           (try Wlc.View.bring_to_front (List.find is_bemenu views)
            with Not_found -> ());
@@ -204,12 +216,18 @@ let rec set_active comp view_opt =
   )
 
 let view_created comp view space =
-  (* TODO: handle & update some internal structure *)
+  let views = views_of_space space in
 
   begin match !active with
   | Some v when is_bemenu view && is_bemenu v ->
     false
   | _ ->
+    begin match views with
+      | None -> set_views_of_space space (Some (Dlist.create view))
+      | Some views_head ->
+        Dlist.prepend views_head view |> ignore
+    end;
+
     if should_focus_on_create view then
       set_active comp (Some view);
 
@@ -219,7 +237,11 @@ let view_created comp view space =
   end
 
 let view_destroyed comp view =
-  (* TODO: handle & update some internal structure *)
+  let space = Wlc.View.get_space view in
+  let view_node = Dlist.get_node
+      (views_of_space space |> Option.get)
+      view
+  in
 
   if !active = Some view then (
     active := None;
@@ -229,15 +251,19 @@ let view_destroyed comp view =
       (* Focus the parent view, if there was one *)
       (* Set parent to None befor this to avoid focusing back to the dying
          view *)
+      (try Dlist.remove view_node with
+         Dlist.Empty -> set_views_of_space space None);
       Wlc.View.set_parent view None;
       set_active comp (Some parent)
     | None ->
       (* Otherwise focus previous one (stacking order) *)
-      if not (Wlc.View.is_single view) then
-        set_active comp (Some (Wlc.View.get_prev view))
+      let prev = Dlist.prev view_node in
+      if prev != view_node then (
+        set_active comp (Some (Dlist.get prev))
+      );
+      (try Dlist.remove view_node with
+         Dlist.Empty -> set_views_of_space space None);
   );
-
-  let space = Wlc.View.get_space view in
   relayout space
 
 let interface = Wlc.Interface.{
