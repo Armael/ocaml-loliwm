@@ -1,0 +1,16 @@
+Name: lambdawm
+Version: 0.1
+Synopsis: Test Compositor for Wlc
+Authors: Armaël Guéneau <armael@isomorphis.me>
+License: MIT
+
+OASISFormat: 0.4
+BuildTools: ocamlbuild
+Plugins: DevFiles (0.4)
+
+Executable "lambdawm"
+  Path: src
+  MainIs: wm.ml
+  CompiledObject: best
+  BuildDepends:
+    batteries, wlc

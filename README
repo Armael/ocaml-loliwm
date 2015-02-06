@@ -1,0 +1,5 @@
+Translation of loliwm (https://github.com/Cloudef/loliwm) in OCaml using the Wlc
+binding.
+
+This is only for experimental purposes, testing Wlc OCaml binding, and learning
+how to use wayland stuff before starting bigger projects.
