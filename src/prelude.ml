@@ -40,6 +40,9 @@ module Dlist = struct
   let get_node (repr: 'a node_t) (x: 'a): 'a node_t =
     Hashtbl.find (Dllist.get repr).backrefs x
 
+  let find (f: 'a -> bool) (node: 'a node_t): 'a node_t =
+    Dllist.find (fun { contents; backrefs } -> f contents) node
+
   let fold_left f acc node =
     Dllist.fold_left (fun acc { contents; backrefs } -> f acc contents) acc node
 
@@ -61,3 +64,9 @@ module Dlist = struct
     | None -> acc
     | Some node -> fold_right f node acc    
 end
+
+(* :-) *)
+let with_ret (f: ('a -> 'b) -> 'a): 'a =
+  let mem = ref (Obj.magic ()) in
+  try f (fun x -> mem := x; raise Exit) with
+    Exit -> !mem

@@ -15,6 +15,20 @@ let views_of_space s =
 
 let set_views_of_space = Hashtbl.replace views_of_space_h
 
+let remove_view space view_node =
+  try
+    let head_view_node = views_of_space space |> Option.get in
+    if head_view_node == view_node then (
+      let next = Dlist.next view_node in
+      Dlist.remove view_node;
+      set_views_of_space space (Some next)
+    ) else (
+      Dlist.remove view_node;
+    )
+  with
+    Invalid_argument _
+  | Dlist.Empty -> set_views_of_space space None
+
 let ( **. ) i f = (Float.of_int i) *. f |> Float.to_int
 
 let is_bemenu v = Wlc.View.get_class v = Some "bemenu"
@@ -65,12 +79,6 @@ let relayout space =
   let res = Wlc.Output.of_space space
             |> Wlc.Output.get_resolution in
 
-  (* TODO: read from the WM's structure describing the views instead of getting
-     all the views.  Eg, if we just received a view_destroyed event, the view
-     should have been remove from the structure, but still exists (will be
-     removed just after). Consequently, View.all_of_space returns it while it
-     shouldn't be relayout'd
-  *)
   let views = views_of_space space in
   let count = Dlist.enum_opt views |> Enum.filter is_tiled |> Enum.count in
 
@@ -126,19 +134,8 @@ let spawn bin =
     Unix.execv "/bin/sh" [| "/bin/sh"; "-c"; bin |]
   )
 
-let output_created comp output =
-  (* add one space *)
-  let _ = Wlc.Output.add_space output in
-  true
-
-let keyboard_key comp view time modifiers key sym state =
-  if modifiers.Wlc.mods = [Config.modifier]
-  && state = Wlc.Key_State_Pressed then (
-    if sym = Wlc.Keysym._Return then (
-      spawn "weston-terminal";
-      false
-    ) else true
-  ) else true
+let screenshot output =
+  Wlc.log "not implemented"
 
 let should_focus_on_create view =
   (* Do not allow unmanaged views to steal focus (tooltips, dnds, etc..) *)
@@ -149,6 +146,26 @@ let should_focus_on_create view =
        && Option.is_some !active
        && Option.is_some parent
        && parent = !active)
+
+let cycle comp =
+  let space = Wlc.Compositor.get_focused_space comp in
+  let views = views_of_space space in
+  match views with
+  | Some views ->
+    let count = Dlist.enum views |> Enum.filter is_tiled |> Enum.count in
+    (* Check that we have at least two tiled views so we don't get in infinite
+       loop *)
+    if count > 1 then (
+      (* cycle until we hit the next tiled view *)
+      let rec loop l =
+        if not (is_tiled (Dlist.get l)) then
+          loop (Dlist.prev l)
+        else l
+      in
+      set_views_of_space space (Some (loop (Dlist.prev views)));
+      relayout space
+    )
+  | None -> ()
 
 let rec raise_all view =
   (* Raise view and all related views to top honoring the stacking order *)
@@ -215,6 +232,56 @@ let rec set_active comp view_opt =
     )
   )
 
+let active_space comp space =
+  let views = Wlc.View.all_of_space space in
+  if views = [] then
+    set_active comp None
+  else
+    set_active comp (Some (List.last views))
+
+let focus_space comp id =
+  let output = Wlc.Compositor.get_focused_output comp in
+  try
+    Wlc.Output.get_spaces output
+    |> flip List.nth id
+    |> Wlc.Output.focus_space output
+  with Failure _ -> ()
+
+let move_to_output comp view id =
+  try
+    let o = Wlc.Compositor.get_outputs comp
+            |> flip List.nth id in
+    Wlc.View.set_space view (Wlc.Output.get_active_space o);
+    Wlc.Compositor.focus_output comp o
+  with Failure _ -> ()
+
+let move_to_space comp view id =
+  let active = Wlc.Compositor.get_focused_space comp in
+  try
+    Wlc.Output.get_spaces (Wlc.Output.of_space active)
+    |> flip List.nth id
+    |> Wlc.View.set_space view
+  with Failure _ -> ()
+
+let focus_next_or_previous_output comp direction =
+  let active = Wlc.Compositor.get_focused_output comp in
+  Wlc.Compositor.get_outputs comp
+  |> Dllist.of_list
+  |> Dllist.find ((=) active)
+  |> (if direction then Dllist.next else Dllist.prev)
+  |> Dllist.get
+  |> Wlc.Compositor.focus_output comp
+
+let focus_next_or_previous_view comp view direction =
+  match views_of_space (Wlc.View.get_space view) with
+  | Some views ->
+    Dlist.find ((=) view) views
+    |> (if direction then Dlist.next else Dlist.prev)
+    |> Dlist.get
+    |> Option.some
+    |> set_active comp
+  | None -> ()
+
 let view_created comp view space =
   let views = views_of_space space in
 
@@ -251,29 +318,167 @@ let view_destroyed comp view =
       (* Focus the parent view, if there was one *)
       (* Set parent to None befor this to avoid focusing back to the dying
          view *)
-      (try Dlist.remove view_node with
-         Dlist.Empty -> set_views_of_space space None);
+      remove_view space view_node;
       Wlc.View.set_parent view None;
       set_active comp (Some parent)
     | None ->
-      (* Otherwise focus previous one (stacking order) *)
-      let prev = Dlist.prev view_node in
-      if prev != view_node then (
-        set_active comp (Some (Dlist.get prev))
+      (* Otherwise focus next one (stacking order) *)
+      let next = Dlist.next view_node in
+      if next != view_node then (
+        set_active comp (Some (Dlist.get next))
       );
-      (try Dlist.remove view_node with
-         Dlist.Empty -> set_views_of_space space None);
+      remove_view space view_node
   );
   relayout space
+
+let view_switch_space comp view space_from space_to =
+  let view_node = Dlist.get_node
+      (views_of_space space_from |> Option.get)
+      view
+  in
+
+  remove_view space_from view_node;
+  relayout space_from;
+  view_created comp view space_to |> ignore;
+
+  if Wlc.Output.(of_space space_from = of_space space_to) then
+    active_space comp space_from
+  else
+    Wlc.View.set_state
+      (List.last (Wlc.View.all_of_space space_from))
+      Wlc.View.Activated
+      true;
+
+  if Wlc.Output.(get_active_space (of_space space_to) = space_to) then
+    Wlc.View.all_of_space space_from
+    |> List.rev
+    |> List.iter (fun v ->
+      if Some v <> !active then
+        Wlc.View.set_state v Wlc.View.Activated false
+    )
+
+let view_geometry_request comp view geometry =
+  let typ = Wlc.View.get_type view in
+  let state = Wlc.View.get_state view in
+  let tiled = is_tiled view in
+  let action = (List.mem Wlc.View.Resizing state)
+               || (List.mem Wlc.View.Moving state)
+  in
+
+  with_ret (fun return ->
+    if tiled && not action then
+      return ();
+
+    if tiled then
+      Wlc.View.set_state view Wlc.View.Maximized false;
+
+    if List.mem Wlc.View.Fullscreen state ||
+       List.mem Wlc.View.Splash typ then
+      return ();
+
+    match Wlc.View.get_parent view with
+    | Some parent when
+        is_managed view &&
+        not (is_or view) ->
+      layout_parent view parent geometry.Wlc.size
+    | _ ->
+      Wlc.View.set_geometry view geometry
+  )
+
+let view_state_request comp view state toggle =
+  Wlc.View.set_state view state toggle;
+
+  match state with
+  | Wlc.View.Maximized ->
+    if toggle then
+      relayout (Wlc.View.get_space view)
+  | Wlc.View.Fullscreen ->
+    relayout (Wlc.View.get_space view)
+  | _ -> ()
+
+let keyboard_key comp view time modifiers key sym state =
+  if modifiers.Wlc.mods = [Config.modifier] &&
+     state = Wlc.Key_State_Pressed then (
+    if sym = Config.exit_key then (
+      Wlc.terminate (); false
+    ) else if Option.is_some view && sym = Config.close_focus_key then (
+      Wlc.View.close (Option.get view); false
+    ) else if sym = Config.term_open_key then (
+      spawn Config.term; false
+    ) else if sym = Config.menu_open_key then (
+      spawn Config.menu_app; false
+    ) else if Option.is_some view && sym = Config.toggle_fullscreen_key then (
+      let v = Option.get view in
+      Wlc.View.set_state v Wlc.View.Fullscreen
+        (not (List.mem Wlc.View.Fullscreen (Wlc.View.get_state v)));
+      relayout (Wlc.Compositor.get_focused_space comp);
+      false
+    ) else if sym = Config.cycle_client_key then (
+      cycle comp; false
+    ) else if sym >= Wlc.Keysym._0 && sym <= Wlc.Keysym._9 then (
+      focus_space comp
+        (if sym = Wlc.Keysym._0 then 9 else sym - Wlc.Keysym._1);
+      false
+    ) else if sym = Config.nmaster_expand_key ||
+              sym = Config.nmaster_shrink_key then (
+      cut := !cut +. (if sym = Config.nmaster_shrink_key then -0.01 else 0.01);
+      if !cut > 1. then cut := 1.;
+      if !cut < 0. then cut := 0.;
+      relayout (Wlc.Compositor.get_focused_space comp);
+      false
+    ) else if Option.is_some view &&
+              (sym = Config.move_focus_output_one ||
+               sym = Config.move_focus_output_two ||
+               sym = Config.move_focus_output_three) then (
+      move_to_output comp (Option.get view)
+        (if sym = Config.move_focus_output_one then 0
+         else if sym = Config.move_focus_output_two then 1
+         else 2);
+      false
+    ) else if Option.is_some view &&
+              sym >= Wlc.Keysym._F1 &&
+              sym <= Wlc.Keysym._F10 then (
+      move_to_space comp (Option.get view) (sym - Wlc.Keysym._F1);
+      false
+    ) else if sym = Config.rotate_output_focus_key then (
+      focus_next_or_previous_output comp true; false
+    ) else if Option.is_some view &&
+              (sym = Config.move_client_focus_left ||
+               sym = Config.move_client_focus_right) then (
+      focus_next_or_previous_view comp (Option.get view)
+        (sym = Config.move_client_focus_left);
+      false
+    ) else if sym = Config.screenshot_key then (
+      screenshot (Wlc.Compositor.get_focused_output comp); false
+    ) else true
+  ) else true
+
+let pointer_button comp view time modifiers button state =
+  if state = Wlc.Button_State_Pressed then
+    set_active comp (Some view);
+  true
+
+let output_created comp output =
+  (* add some spaces *)
+  for i = 0 to 9 do
+    Wlc.Output.add_space output |> ignore;
+  done;
+  true
+
+let resolution_notify comp output res =
+  relayout (Wlc.Output.get_active_space output)
+
+let output_notify comp output =
+  active_space comp (Wlc.Output.get_active_space output)
 
 let interface = Wlc.Interface.{
   view = {
     created = view_created;
     destroyed = view_destroyed;
-    switch_space = (fun _ _ _ _ -> ());
+    switch_space = view_switch_space;
     request = {
-      geometry = (fun _ _ _ -> ());
-      state = (fun _ _ _ _ -> ());
+      geometry = view_geometry_request;
+      state = view_state_request;
     };
   };
 
@@ -282,7 +487,7 @@ let interface = Wlc.Interface.{
   };
 
   pointer = {
-    button = (fun _ _ _ _ _ _ -> true);
+    button = pointer_button;
     scroll = (fun _ _ _ _ _ _ -> true);
     motion = (fun _ _ _ _ -> true);
   };
@@ -290,14 +495,14 @@ let interface = Wlc.Interface.{
   output = {
     created = output_created;
     destroyed = (fun _ _ -> ());
-    activated = (fun _ _ -> ());
-    resolution = (fun _ _ _ -> ());
+    activated = output_notify;
+    resolution = resolution_notify;
   };
 
   space = {
     created = (fun _ _ -> true);
     destroyed = (fun _ _ -> ());
-    activated = (fun _ _ -> ());
+    activated = active_space;
   }
 }
 
