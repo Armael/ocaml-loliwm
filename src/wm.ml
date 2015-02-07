@@ -322,10 +322,10 @@ let view_destroyed comp view =
       Wlc.View.set_parent view None;
       set_active comp (Some parent)
     | None ->
-      (* Otherwise focus next one (stacking order) *)
-      let next = Dlist.next view_node in
-      if next != view_node then (
-        set_active comp (Some (Dlist.get next))
+      (* Otherwise focus previous one (stacking order) *)
+      let prev = Dlist.prev view_node in
+      if prev != view_node then (
+        set_active comp (Some (Dlist.get prev))
       );
       remove_view space view_node
   );
