@@ -455,7 +455,7 @@ let keyboard_key comp view time modifiers key sym state =
 
 let pointer_button comp view time modifiers button state =
   if state = Wlc.Button_State_Pressed then
-    set_active comp (Some view);
+    set_active comp view;
   true
 
 let output_created comp output =
